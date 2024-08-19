@@ -4,6 +4,10 @@ import(path : "onshape/std/common.fs", version : "2411.0");
 export const FRET_BOUNDS =  {
     (unitless): [1, 24, 100]
     } as IntegerBoundSpec;
+    
+export const PERPENDICULAR_FRET_BOUNDS = {
+    (unitless): [1, 9, 100]
+    } as IntegerBoundSpec;
 
 export const SCALE_LENGTH_BOUNDS =  {
     (inch): [1, 25.5, 100],
@@ -88,6 +92,22 @@ export const generativeFretboard = defineFeature(function(context is Context, id
         annotation { "Name" : "Fretboard Radius"}
         isLength(definition.fretboardRadius, FRETBOARD_RADIUS_BOUNDS);
         
+        annotation { "Name" : "Multiscale"}
+        definition.multiscale is boolean;
+        
+        if (definition.multiscale) {
+            annotation { "Group Name" : "Multiscale Options", "Collapsed By Default": true, "Driving Parameter" : "multiscale" } {
+                annotation { "Name": "Highest String Scale Length" }
+                isLength(definition.highMultiscaleLength, SCALE_LENGTH_BOUNDS);
+                
+                annotation { "Name": "Lowest String Scale Length" }
+                isLength(definition.lowMultiscaleLength, SCALE_LENGTH_BOUNDS);
+
+                annotation { "Name": "Perpendicular Fret Number" }
+                isInteger(definition.perpendicularFret, PERPENDICULAR_FRET_BOUNDS);
+            }
+        }
+        
         annotation { "Name" : "Spacing Options" }
         definition.spacingOptions is boolean;
         
@@ -101,8 +121,8 @@ export const generativeFretboard = defineFeature(function(context is Context, id
                 
                 annotation { "Name" : "String Edge Spacing"}
                 isLength(definition.edgeSpacing, EDGE_SPACING_BOUNDS);
-                }
             }
+        }
             
         annotation { "Name" : "Fret Slot Options" }
         definition.slotOptions is boolean;
@@ -114,10 +134,8 @@ export const generativeFretboard = defineFeature(function(context is Context, id
                 
                 annotation { "Name" : "Slot Width"}
                 isLength(definition.fretSlotWidth, FRET_SLOT_WIDTH_BOUNDS);
-                }
             }
-            
-        
+        }
         
         annotation { "Name" : "Advanced Options"}
         definition.advancedOptions is boolean;
@@ -137,143 +155,312 @@ export const generativeFretboard = defineFeature(function(context is Context, id
         
     } {
         
-        // Create fretboard blank profiles on a plane at the nut and at the bridge
-        var fretboardWidth = (definition.stringCount * definition.stringSpacing + definition.edgeSpacing * 2);
-        var halfFretboardWidth = fretboardWidth / 2;
+        // Validate required inputs
+        if (definition.perpendicularFret > definition.fretCount || 
+        definition.perpendicularFret < 1 ||
+        definition.highMultiscaleLength > definition.lowMultiscaleLength) {
+            throw { message : ErrorStringEnum.INVALID_INPUT };
+        }
         
-        var fretboardBlankTop = newSketch(context, id + "fretboardBlankTop", {
-                "sketchPlane" : qCreatedBy(makeId("Front"), EntityType.FACE)
-        });
-        skRectangle(fretboardBlankTop, "fretboardTopProfile", {
-                "firstCorner" : vector(-halfFretboardWidth, 0 * millimeter),
-                "secondCorner" : vector(halfFretboardWidth, -definition.fretboardThicknes)
-        });
-        
-        skSolve(fretboardBlankTop);
-                     
-        var fretboardBlankBottom = newSketchOnPlane(context, id + "fretboardBlankBottom", {
-                "sketchPlane" : plane(vector(0 * millimeter, definition.scaleLength, 0 * millimeter), vector(0 * millimeter, definition.scaleLength, 0 * millimeter))
-        });
-        
-        var fretboardBottomWidth = definition.bridgeStringSpacing * (definition.stringCount - 1) / 2;
-        skRectangle(fretboardBlankBottom, "fretboardBottomProfile", {
-                "firstCorner" : vector(0 * millimeter, -fretboardBottomWidth),
-                "secondCorner" : vector(-definition.fretboardThicknes, fretboardBottomWidth)
-        });
-        
-        skSolve(fretboardBlankBottom);
-        
-        // Loft the fretboard blank from the profiles
-        opLoft(context, id + "fretboardBlank", {
-                "profileSubqueries" : [ qSketchRegion(id + "fretboardBlankTop"), qSketchRegion(id + "fretboardBlankBottom") ],
-                "bodyType" : ToolBodyType.SOLID
-        });
-        
-        opDeleteBodies(context, id + "deleteSketchFretboardBlankTop", { "entities" : qCreatedBy(id + "fretboardBlankTop") });
-        opDeleteBodies(context, id + "deleteSketchFretboardBlankBottom", { "entities" : qCreatedBy(id + "fretboardBlankBottom") });
-        
-        // Calculate fret location
-        var fret_locations = makeArray(definition.fretCount + 1, 0);
-        var current_fret = definition.scaleLength;
-        for (var fret_num = 1; fret_num <= definition.fretCount; fret_num += 1) {
-            current_fret = current_fret / (2 ^ (1/12));
-            fret_locations[fret_num] = definition.scaleLength - current_fret;            
+        if (definition.multiscale) {
+            
+            if (definition.stringCount < 2)  {
+                throw { message : ErrorStringEnum.INVALID_INPUT };
             }
-        
-        // Slots are extruded both ways from the Right plane
-        var fretSlots = newSketch(context, id + "fretSlotsProfile", {
-            "sketchPlane" : qCreatedBy(makeId("Right"), EntityType.FACE)
-        });
-        
-        for (var fret_num = 1; fret_num <= definition.fretCount; fret_num += 1) {
+            
+            // Calculate fret offsets
+            var highFretOffsets = makeArray(definition.fretCount + 1, 0);
+            var lowFretOffsets = makeArray(definition.fretCount + 1, 0);
+            var highCurrentFret = definition.highMultiscaleLength;
+            var lowCurrentFret = definition.lowMultiscaleLength;
+            
+            for (var fretNum = 1; fretNum <= definition.fretCount; fretNum += 1) {
+                highCurrentFret = highCurrentFret / (2 ^ (1/12));
+                highFretOffsets[fretNum] = definition.highMultiscaleLength - highCurrentFret;
+                
+                lowCurrentFret = lowCurrentFret / (2 ^ (1/12));
+                lowFretOffsets[fretNum] = definition.lowMultiscaleLength - lowCurrentFret;            
+            }
+            
+            // Calculate fret locations
+            var lowFretLocations = makeArray(definition.fretCount + 1, 0);
+            var highFretLocations = makeArray(definition.fretCount + 1, 0);
+            var middleFretLocations = makeArray(definition.fretCount + 1, 0);
+            
+            var fretboardTopHorizontalWidth = (definition.stringCount - 1) * definition.stringSpacing;
+            var halfFretboardTopHorizontalWidth = fretboardTopHorizontalWidth / 2;
+            
+            var fretboardBottomHorizontalWidth = (definition.stringCount - 1) * definition.bridgeStringSpacing;
+            var halfFretboardBottomHorizontalWidth = fretboardBottomHorizontalWidth / 2;
+            
+            // Onshape math is wild
+            var fretboardVerticalLength = ((definition.lowMultiscaleLength / millimeter) ^ 2 - (halfFretboardBottomHorizontalWidth / millimeter - halfFretboardTopHorizontalWidth / millimeter) ^ 2) ^ 0.5 * millimeter;
+                        
+            var lowStringAngle = tan((halfFretboardBottomHorizontalWidth - halfFretboardTopHorizontalWidth) / fretboardVerticalLength * radian);
+            
+            for (var fretNum = 1; fretNum <= definition.fretCount; fretNum += 1) {
+                lowFretLocations[fretNum] = vector(lowFretOffsets[fretNum] * sin(lowStringAngle * radian) + halfFretboardTopHorizontalWidth, lowFretOffsets[fretNum] * cos(lowStringAngle * radian));
+            }
+                        
+            // Find each fret low and high point and create a fret 3d object    
+            var xReference = -lowFretOffsets[definition.perpendicularFret] * sin(lowStringAngle * radian) - halfFretboardTopHorizontalWidth;
+            var yReference = lowFretOffsets[definition.perpendicularFret] * cos(lowStringAngle * radian);
+            
+            for (var fretNum = 1; fretNum <= definition.fretCount; fretNum +=1) {
+                highFretLocations[fretNum] = vector(xReference - (highFretOffsets[definition.perpendicularFret] - highFretOffsets[fretNum]) * sin(-lowStringAngle * radian),
+                                                      yReference - (highFretOffsets[definition.perpendicularFret] - highFretOffsets[fretNum]) * cos(-lowStringAngle * radian));
+                middleFretLocations[fretNum] = vector(0 * millimeter, (highFretLocations[fretNum][1] + lowFretLocations[fretNum][1]) / 2);
+                
+                //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+                // The fret now strech from the highest string to the lowest string. They need to reach the end of the fretboard.
+                //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+            }
+            // Find the outer corners of the fretboard
+            // The edge spacing can be horizontal or colinear with the frets. I went with horizontal.
+
+            var highNutDirectionVector = sqrt((highFretLocations[2][0] - highFretLocations[1][0]) ^ 2 + (highFretLocations[2][1] - highFretLocations[1][1]) ^ 2);
+            var highBridgeDistance = definition.highMultiscaleLength - highFretOffsets[1];
+            
+            var lowNutCorner = vector(halfFretboardTopHorizontalWidth + definition.edgeSpacing, 0 * millimeter);
+            var lowBridgeCorner = vector(halfFretboardBottomHorizontalWidth + definition.edgeSpacing, fretboardVerticalLength);
+            var highBridgeCorner = vector(highFretLocations[1][0] + highBridgeDistance * (highFretLocations[2][0] - highFretLocations[1][0]) / highNutDirectionVector - definition.edgeSpacing,
+                                       highFretLocations[1][1] + highBridgeDistance * (highFretLocations[2][1] - highFretLocations[1][1]) / highNutDirectionVector);
+                                       
+            var highNutCorner = vector(highFretLocations[1][0] - highFretOffsets[1] * (highFretLocations[2][0] - highFretLocations[1][0]) / highNutDirectionVector - definition.edgeSpacing,
+                                       highFretLocations[1][1] - highFretOffsets[1] * (highFretLocations[2][1] - highFretLocations[1][1]) / highNutDirectionVector);
+            
+            
+            
+            for (var fretNum = 1; fretNum <= definition.fretCount; fretNum +=1) {
+                // Draw fret line using the points we found
+                var fretLayout = newSketch(context, id + ("fretLayout" ~ fretNum), {
+                    "sketchPlane" : qCreatedBy(makeId("Top"), EntityType.FACE)
+                });
+                
+                skLineSegment(fretLayout, "fret" ~ fretNum, {
+                        "start" : lowFretLocations[fretNum],
+                        "end" : highFretLocations[fretNum]
+                });
+                
+                skSolve(fretLayout);
+                
+                // Also draw fret profiles
+                var fretProfile = newSketch(context, id + ("fretProfile" ~ fretNum), {
+                        "sketchPlane" : qCreatedBy(makeId("Right"), EntityType.FACE)
+                });
+                
+                skRectangle(fretProfile, "fretSlotsProfile" ~ fretNum, {
+                        "firstCorner" : vector(middleFretLocations[fretNum][1] + definition.fretSlotWidth / 2, 0 * millimeter),
+                        "secondCorner" : vector(middleFretLocations[fretNum][1] - definition.fretSlotWidth / 2, -definition.fretSlotDepth)
+                });
+                
+                skSolve(fretProfile);
+                
+                
+                // Sweep the fret 3d shape using the profile and fret line
+                opSweep(context, id + ("fretSlot" ~ fretNum), {
+                        "profiles" : qSketchRegion(id + ("fretProfile" ~ fretNum)),
+                        "path" : qCreatedBy(id + ("fretLayout" ~ fretNum), EntityType.EDGE)->qBodyType(BodyType.WIRE),
+                });
+                
+                opDeleteBodies(context, id + ("deleteFretProfile" ~ fretNum), { "entities" : qCreatedBy(id + ("fretProfile" ~ fretNum)) });
+                opDeleteBodies(context, id + ("deleteFretsLayout" ~ fretNum), { "entities" : qCreatedBy(id + ("fretLayout" ~ fretNum)) });
+                
+            }
+            
+            
+            // Draw fretboard blank
+            var fretboardBlankTop = newSketch(context, id + "fretboardBlankTop", {
+                    "sketchPlane" : qCreatedBy(makeId("Top"), EntityType.FACE)
+            });
+            
+            skLineSegment(fretboardBlankTop, "fretboardBlankNut", {
+                    "start" : lowNutCorner,
+                    "end" : highNutCorner
+            });
+            
+            skLineSegment(fretboardBlankTop, "fretboardBlankBridge", {
+                    "start" : lowBridgeCorner,
+                    "end" : highBridgeCorner
+            });
+            
+            skLineSegment(fretboardBlankTop, "fretboardBlankHighOutline", {
+                    "start" : highNutCorner,
+                    "end" : highBridgeCorner
+            });
+            
+            skLineSegment(fretboardBlankTop, "fretboardBlankLowOutline", {
+                    "start" : lowNutCorner,
+                    "end" : lowBridgeCorner
+            });
+            
+            skSolve(fretboardBlankTop);
+            
+            opExtrude(context, id + "fretboardBlank", {
+                    "entities" : qSketchRegion(id + "fretboardBlankTop"),
+                    "direction" : -evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "fretboardBlankTop", false) }).normal,
+                    "endBound" : BoundingType.BLIND,
+                    "endDepth" : definition.fretboardThicknes
+            });
+                        
+            // Remove frets from the fretboard blank
+            for (var fretNum = 1; fretNum <= definition.fretCount; fretNum +=1) {
+                opBoolean(context, id + ("fretSlotsCut" ~ fretNum), {
+                    "tools" : qBodyType(qCreatedBy(id + ("fretSlot" ~ fretNum), EntityType.BODY), BodyType.SOLID),
+                    "targets": qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
+                    "operationType" : BooleanOperationType.SUBTRACTION
+                });
+            }
+            
+            
+            
+            
+            // Frets are swept between strings, need to be up to the edge of the blank ( - blind space)
+            //////////////////////////////////////////////////////////////////////////////////////
+            //////////////////////////////////////////////////////////////////////////////////////
+            //////////////////////////////////////////////////////////////////////////////////////
+            //////////////////////////////////////////////////////////////////////////////////////
+            
+        } else {
+            
+            // Create fretboard blank profiles on a plane at the nut and at the bridge
+            var fretboardWidth = ((definition.stringCount - 1) * definition.stringSpacing + definition.edgeSpacing * 2);
+            var halfFretboardWidth = fretboardWidth / 2;
+            
+            var fretboardBlankTop = newSketch(context, id + "fretboardBlankTop", {
+                    "sketchPlane" : qCreatedBy(makeId("Front"), EntityType.FACE)
+            });
+            
+            skRectangle(fretboardBlankTop, "fretboardTopProfile", {
+                    "firstCorner" : vector(-halfFretboardWidth, 0 * millimeter),
+                    "secondCorner" : vector(halfFretboardWidth, -definition.fretboardThicknes)
+            });
+            
+            skSolve(fretboardBlankTop);
+                         
+            var fretboardBlankBottom = newSketchOnPlane(context, id + "fretboardBlankBottom", {
+                    "sketchPlane" : plane(vector(0 * millimeter, definition.scaleLength, 0 * millimeter), vector(0 * millimeter, definition.scaleLength, 0 * millimeter))
+            });
+            
+            var fretboardBottomWidth = (definition.bridgeStringSpacing * (definition.stringCount - 1) + (2 * definition.edgeSpacing)) / 2;
+            skRectangle(fretboardBlankBottom, "fretboardBottomProfile", {
+                    "firstCorner" : vector(0 * millimeter, -fretboardBottomWidth),
+                    "secondCorner" : vector(-definition.fretboardThicknes, fretboardBottomWidth)
+            });
+            
+            skSolve(fretboardBlankBottom);
+            
+            // Loft the fretboard blank from the profiles
+            opLoft(context, id + "fretboardBlank", {
+                    "profileSubqueries" : [ qSketchRegion(id + "fretboardBlankTop"), qSketchRegion(id + "fretboardBlankBottom") ],
+                    "bodyType" : ToolBodyType.SOLID
+            });
+            
+            opDeleteBodies(context, id + "deleteSketchFretboardBlankTop", { "entities" : qCreatedBy(id + "fretboardBlankTop") });
+            opDeleteBodies(context, id + "deleteSketchFretboardBlankBottom", { "entities" : qCreatedBy(id + "fretboardBlankBottom") });
+            
+            // Calculate fret location
+            var fret_locations = makeArray(definition.fretCount + 1, 0);
+            var current_fret = definition.scaleLength;
+            for (var fret_num = 1; fret_num <= definition.fretCount; fret_num += 1) {
+                current_fret = current_fret / (2 ^ (1/12));
+                fret_locations[fret_num] = definition.scaleLength - current_fret;            
+            }
+            
+            // Slots are extruded both ways from the Right plane
+            var fretSlots = newSketch(context, id + "fretSlotsProfile", {
+                "sketchPlane" : qCreatedBy(makeId("Right"), EntityType.FACE)
+            });
+            
+            for (var fret_num = 1; fret_num <= definition.fretCount; fret_num += 1) {
                 // Placeholder dimension for fret tangs - 1.4 * 0.5 mm
                 skRectangle(fretSlots, "fretSlotsProfile"  ~ fret_num, {
                         "firstCorner" : vector(fret_locations[fret_num] + definition.fretSlotWidth / 2, 0 * millimeter),
                         "secondCorner" : vector(fret_locations[fret_num] - definition.fretSlotWidth / 2, -definition.fretSlotDepth)
                 });
             }
-
-        skSolve(fretSlots);
-
-        // Extrude fret shape both ways
-        opExtrude(context, id + "fretSlots", {
-            "operationType": NewBodyOperationType.REMOVE,
-            "entities" : qSketchRegion(id + "fretSlotsProfile"),
-            "direction" : evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "fretSlotsProfile", false) }).normal,
-            "endBound" : BoundingType.UP_TO_NEXT,
-            "isStartBoundOpposite" : true,
-            "endTranslationalOffset" : -definition.blindSlotThickness,
-            "startBound" : BoundingType.UP_TO_NEXT,
-            "startTranslationalOffset" : -definition.blindSlotThickness
-        });
-
-        opBoolean(context, id + "fretSlotsCut", {
-                "tools" : qBodyType(qCreatedBy(id + "fretSlots", EntityType.BODY), BodyType.SOLID),
-                "targets": qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
-                "operationType" : BooleanOperationType.SUBTRACTION
-        });
-        
-        opDeleteBodies(context, id + "deleteSketchFretSlotsProfile", { "entities" : qCreatedBy(id + "fretSlotsProfile") });
-        
-        // Cut excess material after the last fret
-        var excessCut = newSketch(context, id + "excessCutTop", {
-                "sketchPlane" : qCreatedBy(makeId("Top"), EntityType.FACE)
-        });
-        
-        skRectangle(excessCut, "excessCutProfile", {
-                "firstCorner" : vector(-fretboardBottomWidth, definition.scaleLength),
-                "secondCorner" : vector(fretboardBottomWidth, fret_locations[definition.fretCount] + definition.bodyOverlap)
-        });
-        
-        skSolve(excessCut);
-        
-        opExtrude(context, id + "excessCutBody", {
+    
+            skSolve(fretSlots);
+    
+            // Extrude fret shape both ways
+            opExtrude(context, id + "fretSlots", {
                 "operationType": NewBodyOperationType.REMOVE,
-                "entities" : qSketchRegion(id + "excessCutTop"),
-                "direction" : -evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "excessCutTop", false) }).normal,
-                "endBound" : BoundingType.THROUGH_ALL,
-        });
-        
-        opBoolean(context, id + "excessCut", {
-                "targets" : qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
-                "tools" : qBodyType(qCreatedBy(id + "excessCutBody", EntityType.BODY), BodyType.SOLID),
-                "operationType" : BooleanOperationType.SUBTRACTION
-        });
-        
-        opDeleteBodies(context, id + "deleteSketchExcessCutTop", { "entities" : qCreatedBy(id + "excessCutTop") });
-        
-        // Create fretboard radius
-        var fretboardRadiusProfile = newSketch(context, id + "fretboardRadiusProfile", {
-            "sketchPlane" : qCreatedBy(makeId("Front"), EntityType.FACE),
-        });
-        
-        skCircle(fretboardRadiusProfile, "fretboardRadiusCircle", {
-                "center" : vector(0 * inch, -definition.fretboardRadius),
-                "radius" : definition.fretboardRadius
-        });
-        
-        skSolve(fretboardRadiusProfile);
-        
-        opExtrude(context, id + "fretboardRadiusBody", {
-                "operationType": NewBodyOperationType.REMOVE,
-                "entities" : qSketchRegion(id + "fretboardRadiusProfile"),
-                "direction" : -evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "fretboardRadiusProfile", false) }).normal,
-                "endBound" : BoundingType.THROUGH_ALL
-        });
-        
-                
-        opBoolean(context, id + "fretboardRadiusCut", {
-                "targets" : qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
-                "tools": qBodyType(qCreatedBy(id + "fretboardRadiusBody", EntityType.BODY), BodyType.SOLID),
-                "operationType" : BooleanOperationType.SUBTRACT_COMPLEMENT
-        });
-        
-        opDeleteBodies(context, id + "deleteSketchFretboardRadiusProfile", { "entities" : qCreatedBy(id + "fretboardRadiusProfile") });
+                "entities" : qSketchRegion(id + "fretSlotsProfile"),
+                "direction" : evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "fretSlotsProfile", false) }).normal,
+                "endBound" : BoundingType.UP_TO_NEXT,
+                "isStartBoundOpposite" : true,
+                "endTranslationalOffset" : -definition.blindSlotThickness,
+                "startBound" : BoundingType.UP_TO_NEXT,
+                "startTranslationalOffset" : -definition.blindSlotThickness
+            });
+    
+            opBoolean(context, id + "fretSlotsCut", {
+                    "tools" : qBodyType(qCreatedBy(id + "fretSlots", EntityType.BODY), BodyType.SOLID),
+                    "targets": qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
+                    "operationType" : BooleanOperationType.SUBTRACTION
+            });
+            
+            opDeleteBodies(context, id + "deleteSketchFretSlotsProfile", { "entities" : qCreatedBy(id + "fretSlotsProfile") });
+            
+            // Cut excess material after the last fret
+            var excessCut = newSketch(context, id + "excessCutTop", {
+                    "sketchPlane" : qCreatedBy(makeId("Top"), EntityType.FACE)
+            });
+            
+            skRectangle(excessCut, "excessCutProfile", {
+                    "firstCorner" : vector(-fretboardBottomWidth, definition.scaleLength),
+                    "secondCorner" : vector(fretboardBottomWidth, fret_locations[definition.fretCount] + definition.bodyOverlap)
+            });
+            
+            skSolve(excessCut);
+            
+            opExtrude(context, id + "excessCutBody", {
+                    "operationType": NewBodyOperationType.REMOVE,
+                    "entities" : qSketchRegion(id + "excessCutTop"),
+                    "direction" : -evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "excessCutTop", false) }).normal,
+                    "endBound" : BoundingType.THROUGH_ALL,
+            });
+            
+            opBoolean(context, id + "excessCut", {
+                    "targets" : qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
+                    "tools" : qBodyType(qCreatedBy(id + "excessCutBody", EntityType.BODY), BodyType.SOLID),
+                    "operationType" : BooleanOperationType.SUBTRACTION
+            });
+            
+            opDeleteBodies(context, id + "deleteSketchExcessCutTop", { "entities" : qCreatedBy(id + "excessCutTop") });
+            
+            // Create fretboard radius
+            var fretboardRadiusProfile = newSketch(context, id + "fretboardRadiusProfile", {
+                "sketchPlane" : qCreatedBy(makeId("Front"), EntityType.FACE),
+            });
+            
+            skCircle(fretboardRadiusProfile, "fretboardRadiusCircle", {
+                    "center" : vector(0 * inch, -definition.fretboardRadius),
+                    "radius" : definition.fretboardRadius
+            });
+            
+            skSolve(fretboardRadiusProfile);
+            
+            opExtrude(context, id + "fretboardRadiusBody", {
+                    "operationType": NewBodyOperationType.REMOVE,
+                    "entities" : qSketchRegion(id + "fretboardRadiusProfile"),
+                    "direction" : -evOwnerSketchPlane(context, { "entity" : qSketchRegion(id + "fretboardRadiusProfile", false) }).normal,
+                    "endBound" : BoundingType.THROUGH_ALL
+            });
+            
+                    
+            opBoolean(context, id + "fretboardRadiusCut", {
+                    "targets" : qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
+                    "tools": qBodyType(qCreatedBy(id + "fretboardRadiusBody", EntityType.BODY), BodyType.SOLID),
+                    "operationType" : BooleanOperationType.SUBTRACT_COMPLEMENT
+            });
+            
+            opDeleteBodies(context, id + "deleteSketchFretboardRadiusProfile", { "entities" : qCreatedBy(id + "fretboardRadiusProfile") });
+        }
         
         setProperty(context, {
             "entities" : qBodyType(qCreatedBy(id + "fretboardBlank", EntityType.BODY), BodyType.SOLID),
             "propertyType" : PropertyType.APPEARANCE,
             "value" : color(0.21, 0.21, 0.21)
         });
-        
     });
