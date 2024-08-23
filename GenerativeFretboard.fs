@@ -164,7 +164,7 @@ export const generativeFretboard = defineFeature(function(context is Context, id
         
         if (definition.multiscale) {
             
-            if (definition.stringCount < 2)  {
+            if (definition.stringCount < 2) {
                 throw { message : ErrorStringEnum.INVALID_INPUT };
             }
             
