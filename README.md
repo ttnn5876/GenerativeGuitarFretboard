@@ -3,7 +3,7 @@ Generates 3D guitar fretboard model using Onshape FeatureScript
 
 
 **TODO**:
- - Multi-scale functionality
+ - Multi-scale corner bug
  - Left haneded
  - Slanted frets
  - Implement relative string spacing (string spacing at the nut is constant ATM)
